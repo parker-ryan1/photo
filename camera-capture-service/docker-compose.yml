@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  camera-capture:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: camera-capture-service
+    volumes:
+      # Mount captured images to host (Windows path style)
+      - type: bind
+        source: ./captured_images
+        target: C:/app/captured_images
+      # Mount config file
+      - type: bind
+        source: ./capture_config.json
+        target: C:/app/capture_config.json
+    # Windows containers require different device access
+    privileged: true
+    restart: unless-stopped
+    environment:
+      - DOTNET_ENVIRONMENT=Production
+    # Windows containers networking
+    networks:
+      - default
+    # Note: USB device passthrough for cameras requires:
+    # 1. Windows containers enabled
+    # 2. Canon drivers installed on host
+    # 3. Camera connected via USB
+
+networks:
+  default:
+    driver: nat

@@ -1,0 +1,13 @@
+C:\Users\parke\picturesforcraig\camera-capture-service\publish\EDSDK.dll
+C:\Users\parke\picturesforcraig\camera-capture-service\publish\EdsImage.dll
+C:\Users\parke\picturesforcraig\camera-capture-service\publish\capture_config.json
+C:\Users\parke\picturesforcraig\camera-capture-service\publish\CameraCaptureService.exe
+C:\Users\parke\picturesforcraig\camera-capture-service\publish\CameraCaptureService.dll
+C:\Users\parke\picturesforcraig\camera-capture-service\publish\CameraCaptureService.deps.json
+C:\Users\parke\picturesforcraig\camera-capture-service\publish\CameraCaptureService.runtimeconfig.json
+C:\Users\parke\picturesforcraig\camera-capture-service\publish\CameraCaptureService.pdb
+C:\Users\parke\picturesforcraig\camera-capture-service\publish\Newtonsoft.Json.dll
+C:\Users\parke\picturesforcraig\camera-capture-service\publish\System.CodeDom.dll
+C:\Users\parke\picturesforcraig\camera-capture-service\publish\System.Management.dll
+C:\Users\parke\picturesforcraig\camera-capture-service\publish\System.Windows.Forms.dll
+C:\Users\parke\picturesforcraig\camera-capture-service\publish\runtimes\win\lib\net8.0\System.Management.dll
