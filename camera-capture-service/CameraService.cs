@@ -28,9 +28,52 @@ namespace CameraCaptureService
         
         public bool IsInitialized => _isInitialized;
         
+        public void SetCaptureState(bool isCapturing)
+        {
+            _isCapturing = isCapturing;
+            Console.WriteLine($"[CAPTURE_STATE] Capture state set to: {isCapturing}");
+        }
+        
         public async Task InitializeAsync()
         {
             await Task.Run(InitializeCamera);
+            
+            // Start periodic scanning for missed files
+            if (_isInitialized)
+            {
+                StartPeriodicFileScanning();
+            }
+        }
+        
+        private void StartPeriodicFileScanning()
+        {
+            Task.Run(async () =>
+            {
+                Console.WriteLine("[PERIODIC] Starting periodic file scanning (disabled during burst sequences)...");
+                while (_isInitialized)
+                {
+                    try
+                    {
+                        await Task.Delay(30000); // Scan every 30 seconds (less frequent)
+                        
+                        // Skip scanning if we're in the middle of a capture sequence
+                        if (_isCapturing)
+                        {
+                            Console.WriteLine("[PERIODIC] Skipping scan - capture sequence in progress");
+                            continue;
+                        }
+                        
+                        Console.WriteLine("[PERIODIC] Performing periodic scan for missed files...");
+                        ScanAndDownloadNewFiles();
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[PERIODIC] Error during periodic scan: {ex.Message}");
+                        await Task.Delay(5000);
+                    }
+                }
+                Console.WriteLine("[PERIODIC] Periodic scanning stopped");
+            });
         }
         
         public CameraController? GetCameraController()
@@ -334,8 +377,27 @@ namespace CameraCaptureService
                 if (inEvent == EDSDK.kEdsObjectEvent_DirItemCreated)
                 {
                     Console.WriteLine("[EVENT] New file created on SD card");
-                    // Instead of using the event reference, scan for new files
-                    Task.Run(() => ScanAndDownloadNewFiles());
+                    
+                    // Skip immediate download during capture sequences
+                    if (_isCapturing)
+                    {
+                        Console.WriteLine("[EVENT] Capture sequence in progress - file will be downloaded later in bulk");
+                        return EDSDK.EDS_ERR_OK;
+                    }
+                    
+                    // Only process files immediately if we're not in a capture sequence
+                    Task.Run(async () => 
+                    {
+                        try
+                        {
+                            Console.WriteLine("[EVENT] Processing file from event (not during capture sequence)...");
+                            ProcessNewFile(inRef);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[EVENT] Event processing failed: {ex.Message}");
+                        }
+                    });
                 }
             }
             catch (Exception ex)
@@ -500,13 +562,9 @@ namespace CameraCaptureService
                     Console.WriteLine($"[CAPTURE] ✅ {captureType} capture command sent successfully");
                     _isCapturing = true;
                     
-                    // Process events for a short time to handle the capture
-                    Task.Run(async () =>
-                    {
-                        await Task.Delay(3000); // Wait 3 seconds for capture to complete
-                        _isCapturing = false; // Reset capture state
-                        Console.WriteLine($"[CAPTURE] {captureType} capture state reset");
-                    });
+                    // NO IMMEDIATE DOWNLOAD - Let photos accumulate on SD card
+                    // Downloads will happen only during bulk download phase
+                    Console.WriteLine($"[CAPTURE] Photo stored on SD card - will download later in bulk");
                     
                     return true;
                 }
@@ -560,6 +618,119 @@ namespace CameraCaptureService
                 }
             });
         }
+
+        
+        public async Task<int> BulkDownloadAllFilesAsync()
+        {
+            return await Task.Run(() =>
+            {
+                try
+                {
+                    if (_cameraModel?.Camera == IntPtr.Zero) return 0;
+                    
+                    Console.WriteLine("[BULK_DOWNLOAD] Scanning SD card for all files to download...");
+                    
+                    // Get volume
+                    IntPtr volume = IntPtr.Zero;
+                    uint err = EDSDK.EdsGetChildAtIndex(_cameraModel.Camera, 0, out volume);
+                    if (err != EDSDK.EDS_ERR_OK) 
+                    {
+                        Console.WriteLine($"[BULK_DOWNLOAD] Failed to get volume: {err}");
+                        return 0;
+                    }
+                    
+                    // Get DCIM directory
+                    IntPtr dcimDir = IntPtr.Zero;
+                    err = EDSDK.EdsGetChildAtIndex(volume, 0, out dcimDir);
+                    if (err != EDSDK.EDS_ERR_OK)
+                    {
+                        Console.WriteLine($"[BULK_DOWNLOAD] Failed to get DCIM directory: {err}");
+                        EDSDK.EdsRelease(volume);
+                        return 0;
+                    }
+                    
+                    var allFiles = new List<(IntPtr handle, EDSDK.EdsDirectoryItemInfo info)>();
+                    
+                    // Collect all image files
+                    int dirCount = 0;
+                    err = EDSDK.EdsGetChildCount(dcimDir, out dirCount);
+                    if (err == EDSDK.EDS_ERR_OK)
+                    {
+                        Console.WriteLine($"[BULK_DOWNLOAD] Found {dirCount} directories in DCIM");
+                        for (int i = 0; i < dirCount; i++)
+                        {
+                            IntPtr folder = IntPtr.Zero;
+                            err = EDSDK.EdsGetChildAtIndex(dcimDir, i, out folder);
+                            if (err == EDSDK.EDS_ERR_OK)
+                            {
+                                CollectFilesFromFolder(folder, allFiles);
+                                EDSDK.EdsRelease(folder);
+                            }
+                        }
+                    }
+                    
+                    EDSDK.EdsRelease(dcimDir);
+                    EDSDK.EdsRelease(volume);
+                    
+                    Console.WriteLine($"[BULK_DOWNLOAD] Found {allFiles.Count} total image files on SD card");
+                    
+                    // Sort files by name to process in order (newest last)
+                    var sortedFiles = allFiles.OrderBy(f => f.info.szFileName).ToList();
+                    
+                    // Download ALL files (not just new ones)
+                    int downloadedCount = 0;
+                    foreach (var (handle, info) in sortedFiles)
+                    {
+                        try
+                        {
+                            var fileKey = $"{info.szFileName}_{info.Size}";
+                            
+                            lock (_fileTrackingLock)
+                            {
+                                if (!_processedFiles.Contains(fileKey))
+                                {
+                                    Console.WriteLine($"[BULK_DOWNLOAD] Downloading: {info.szFileName} ({info.Size} bytes)");
+                                    
+                                    // Download the file
+                                    bool downloadSuccess = DownloadFile(handle, info);
+                                    
+                                    if (downloadSuccess)
+                                    {
+                                        // Mark as processed only if download was successful
+                                        _processedFiles.Add(fileKey);
+                                        _lastProcessedFileName = info.szFileName;
+                                        _lastProcessedFileSize = info.Size;
+                                        downloadedCount++;
+                                        Console.WriteLine($"[BULK_DOWNLOAD] ✅ Downloaded: {info.szFileName}");
+                                    }
+                                    else
+                                    {
+                                        Console.WriteLine($"[BULK_DOWNLOAD] ❌ Failed to download: {info.szFileName}");
+                                    }
+                                }
+                                else
+                                {
+                                    Console.WriteLine($"[BULK_DOWNLOAD] Skipping already processed: {info.szFileName}");
+                                }
+                            }
+                        }
+                        finally
+                        {
+                            EDSDK.EdsRelease(handle);
+                        }
+                    }
+                    
+                    Console.WriteLine($"[BULK_DOWNLOAD] ✅ Bulk download complete: {downloadedCount} files downloaded");
+                    return downloadedCount;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[BULK_DOWNLOAD] Error during bulk download: {ex.Message}");
+                    Console.WriteLine($"[BULK_DOWNLOAD] Stack trace: {ex.StackTrace}");
+                    return 0;
+                }
+            });
+        }
         
         public void ResetFileTracking()
         {
@@ -571,6 +742,7 @@ namespace CameraCaptureService
                 Console.WriteLine("[FILE_TRACK] File tracking reset");
             }
         }
+
         
         public async Task<bool> DeleteLatestFileFromSDAsync()
         {
@@ -685,7 +857,7 @@ namespace CameraCaptureService
                    fileName.EndsWith(".raw");
         }
         
-        private void ScanAndDownloadNewFiles()
+        public void ScanAndDownloadNewFiles()
         {
             try
             {
@@ -693,16 +865,24 @@ namespace CameraCaptureService
                 
                 Console.WriteLine("[SCAN] Scanning SD card for new files to download...");
                 
+                // Add a small delay to ensure file is fully written
+                Thread.Sleep(1000);
+                
                 // Get volume
                 IntPtr volume = IntPtr.Zero;
                 uint err = EDSDK.EdsGetChildAtIndex(_cameraModel.Camera, 0, out volume);
-                if (err != EDSDK.EDS_ERR_OK) return;
+                if (err != EDSDK.EDS_ERR_OK) 
+                {
+                    Console.WriteLine($"[SCAN] Failed to get volume: {err}");
+                    return;
+                }
                 
                 // Get DCIM directory
                 IntPtr dcimDir = IntPtr.Zero;
                 err = EDSDK.EdsGetChildAtIndex(volume, 0, out dcimDir);
                 if (err != EDSDK.EDS_ERR_OK)
                 {
+                    Console.WriteLine($"[SCAN] Failed to get DCIM directory: {err}");
                     EDSDK.EdsRelease(volume);
                     return;
                 }
@@ -714,6 +894,7 @@ namespace CameraCaptureService
                 err = EDSDK.EdsGetChildCount(dcimDir, out dirCount);
                 if (err == EDSDK.EDS_ERR_OK)
                 {
+                    Console.WriteLine($"[SCAN] Found {dirCount} directories in DCIM");
                     for (int i = 0; i < dirCount; i++)
                     {
                         IntPtr folder = IntPtr.Zero;
@@ -731,9 +912,12 @@ namespace CameraCaptureService
                 
                 Console.WriteLine($"[SCAN] Found {allFiles.Count} total image files on SD card");
                 
+                // Sort files by name to process in order (newest last)
+                var sortedFiles = allFiles.OrderBy(f => f.info.szFileName).ToList();
+                
                 // Find and download new files
                 int downloadedCount = 0;
-                foreach (var (handle, info) in allFiles)
+                foreach (var (handle, info) in sortedFiles)
                 {
                     try
                     {
@@ -762,6 +946,10 @@ namespace CameraCaptureService
                                     Console.WriteLine($"[SCAN] ❌ Failed to download: {info.szFileName}");
                                 }
                             }
+                            else
+                            {
+                                Console.WriteLine($"[SCAN] Skipping already processed file: {info.szFileName}");
+                            }
                         }
                     }
                     finally
@@ -782,6 +970,7 @@ namespace CameraCaptureService
             catch (Exception ex)
             {
                 Console.WriteLine($"[SCAN] Error scanning for new files: {ex.Message}");
+                Console.WriteLine($"[SCAN] Stack trace: {ex.StackTrace}");
             }
         }
         

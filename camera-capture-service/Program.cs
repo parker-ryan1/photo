@@ -193,54 +193,72 @@ namespace CameraCaptureService
         {
             try
             {
-                Console.WriteLine($"[AUTOMATION] 🚀 Starting automated capture sequence of {_config.frames_per_sequence} frames");
+                Console.WriteLine($"[AUTOMATION] 🚀 Starting BURST capture sequence of {_config.frames_per_sequence} frames");
+                Console.WriteLine("[AUTOMATION] 📸 Strategy: Take all photos rapidly, then download all at once");
+                
+                // SET CAPTURE STATE TO PREVENT ANY DOWNLOADS DURING SEQUENCE
+                _cameraService.SetCaptureState(true);
                 
                 // Clear SD card first
                 await ClearSDCardBeforeSequence();
                 
-                // Take the sequence of photos
+                // PHASE 1: RAPID BURST CAPTURE - Take all photos as fast as possible
+                Console.WriteLine($"[AUTOMATION] 🔥 PHASE 1: Taking {_config.frames_per_sequence} photos in rapid burst...");
+                int successfulCaptures = 0;
+                
                 for (int i = 1; i <= _config.frames_per_sequence; i++)
                 {
                     if (!_isRunning || !_sequenceInProgress) break;
                     
-                    Console.WriteLine($"[AUTOMATION] Taking automated picture {i}/{_config.frames_per_sequence}");
+                    Console.WriteLine($"[AUTOMATION] 📸 Burst photo {i}/{_config.frames_per_sequence}");
                     
                     bool captureSuccess = _cameraService.TriggerManualCapture(true);
                     
                     if (!captureSuccess)
                     {
-                        Console.WriteLine($"[AUTOMATION] ❌ Failed to capture frame {i}, continuing with sequence");
+                        Console.WriteLine($"[AUTOMATION] ❌ Failed to capture frame {i}");
                     }
                     else
                     {
-                        Console.WriteLine($"[AUTOMATION] ✅ Frame {i} capture triggered successfully");
-                        
-                        // Wait for capture processing
-                        Console.WriteLine("[AUTOMATION] ⏳ Waiting for capture processing...");
-                        await Task.Delay(5000);
-                        
-                        // Verify the photo was taken
-                        var cardFiles = await _cameraService.GetCardFilesAsync();
-                        Console.WriteLine($"[AUTOMATION] 📊 After photo {i}: {cardFiles.Count} files on SD card");
+                        Console.WriteLine($"[AUTOMATION] ✅ Frame {i} capture triggered");
+                        successfulCaptures++;
                     }
                     
-                    // Wait between frames (except for the last one)
+                    // Minimal delay between burst shots - just enough for camera to process command
                     if (i < _config.frames_per_sequence)
                     {
-                        Console.WriteLine($"[AUTOMATION] ⏳ Waiting {_config.frame_delay_seconds} seconds before next picture");
-                        await Task.Delay(TimeSpan.FromSeconds(_config.frame_delay_seconds));
-                        
-                        // Additional delay to ensure camera is ready
-                        Console.WriteLine("[AUTOMATION] ⏳ Additional camera ready delay...");
-                        await Task.Delay(2000);
+                        await Task.Delay(2000); // Only 2 seconds between shots for rapid burst
                     }
                 }
-                Console.WriteLine($"[AUTOMATION] ✅ Automated capture sequence completed successfully");
+                
+                Console.WriteLine($"[AUTOMATION] 🔥 BURST COMPLETE: {successfulCaptures}/{_config.frames_per_sequence} photos triggered");
+                
+                // PHASE 2: WAIT FOR ALL PHOTOS TO BE WRITTEN TO SD CARD
+                Console.WriteLine("[AUTOMATION] ⏳ PHASE 2: Waiting for all photos to be written to SD card...");
+                await Task.Delay(30000); // Wait 30 seconds for all photos to be written
+                
+                // PHASE 3: ENABLE DOWNLOADS AND BULK DOWNLOAD ALL PHOTOS
+                Console.WriteLine("[AUTOMATION] 📥 PHASE 3: Enabling downloads and downloading all photos from SD card...");
+                _cameraService.SetCaptureState(false); // Allow downloads now
+                
+                // Use the existing scanning method which is proven to work
+                Console.WriteLine("[AUTOMATION] 📥 Starting bulk download using scan method...");
+                _cameraService.ScanAndDownloadNewFiles();
+                
+                Console.WriteLine("[AUTOMATION] 📥 Bulk download complete!");
+                
+                Console.WriteLine($"[AUTOMATION] 🎉 SEQUENCE COMPLETE: Photos downloaded successfully!");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[AUTOMATION] Error during automated capture sequence: {ex.Message}");
+                Console.WriteLine($"[AUTOMATION] Error during burst capture sequence: {ex.Message}");
                 Console.WriteLine($"[AUTOMATION] Stack trace: {ex.StackTrace}");
+            }
+            finally
+            {
+                // ALWAYS RESET CAPTURE STATE WHEN SEQUENCE ENDS
+                _cameraService.SetCaptureState(false);
+                Console.WriteLine("[AUTOMATION] 🔄 Capture state reset - downloads re-enabled");
             }
         }
         
